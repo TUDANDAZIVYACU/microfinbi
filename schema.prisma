@@ -1,0 +1,334 @@
+// ==========================================================
+// microfin.bi — Schéma Prisma (multi-tenant, schema partagé)
+// Convention : tenantId présent + indexé sur toutes les tables
+// métier. Aucune requête ne doit s'exécuter sans filtre tenantId.
+// ==========================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")   // pooler Neon
+  directUrl = env("DIRECT_URL")     // non-pooler Neon (migrations)
+}
+
+// ---------------------------------------------------------
+// TENANT & STRUCTURE
+// ---------------------------------------------------------
+
+model Tenant {
+  id            String   @id @default(cuid())
+  nom           String
+  sigle         String?
+  slug          String   @unique   // sous-domaine ou identifiant URL
+  actif         Boolean  @default(true)
+  planAbonnement String  @default("essai") // essai / standard / premium
+  dateExpiration DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  agences         Agence[]
+  users           User[]
+  membres         Membre[]
+  produitsCredit  ProduitCredit[]
+  produitsEpargne ProduitEpargne[]
+  credits         Credit[]
+  comptesEpargne  CompteEpargne[]
+  caisseMouvements CaisseMouvement[]
+  banqueMouvements BanqueMouvement[]
+  depenses        DepenseTenant[]
+
+  @@index([slug])
+}
+
+model Agence {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  nom       String
+  ville     String?
+  actif     Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  users    User[]
+  membres  Membre[]
+  credits  Credit[]
+
+  @@index([tenantId])
+}
+
+// ---------------------------------------------------------
+// UTILISATEURS (Clerk)
+// ---------------------------------------------------------
+
+enum RoleUser {
+  SUPER_ADMIN   // équipe microfin.bi (multi-tenant)
+  ADMIN_TENANT  // admin de l'IMF
+  AGENT_CREDIT
+  CAISSIER
+  AUDITEUR
+}
+
+model User {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  agenceId  String?
+  agence    Agence?  @relation(fields: [agenceId], references: [id])
+  clerkId   String   @unique
+  nom       String
+  email     String
+  role      RoleUser @default(AGENT_CREDIT)
+  actif     Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  creditsGeres    Credit[]  @relation("AgentCredit")
+  mouvementsCaisse CaisseMouvement[]
+
+  @@index([tenantId])
+  @@index([clerkId])
+}
+
+// ---------------------------------------------------------
+// MEMBRES (clients de l'IMF)
+// ---------------------------------------------------------
+
+enum StatutMembre {
+  ACTIF
+  SUSPENDU
+  RADIE
+}
+
+model Membre {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  agenceId      String
+  agence        Agence   @relation(fields: [agenceId], references: [id])
+  numeroMembre  String   // séquentiel par tenant, ex: MB-2026-0001
+  nom           String
+  prenom        String
+  telephone     String?
+  adresse       String?
+  pieceIdentite String?
+  dateNaissance DateTime?
+  statut        StatutMembre @default(ACTIF)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  comptesEpargne CompteEpargne[]
+  credits        Credit[]
+
+  @@unique([tenantId, numeroMembre])
+  @@index([tenantId])
+  @@index([agenceId])
+}
+
+// ---------------------------------------------------------
+// ÉPARGNE
+// ---------------------------------------------------------
+
+model ProduitEpargne {
+  id             String  @id @default(cuid())
+  tenantId       String
+  tenant         Tenant  @relation(fields: [tenantId], references: [id])
+  nom            String
+  tauxRemuneration Decimal @db.Decimal(5, 2) // % annuel
+  soldeMinimum   Decimal @db.Decimal(14, 2) @default(0)
+  actif          Boolean @default(true)
+
+  comptes CompteEpargne[]
+
+  @@index([tenantId])
+}
+
+model CompteEpargne {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  membreId        String
+  membre          Membre   @relation(fields: [membreId], references: [id])
+  produitId       String
+  produit         ProduitEpargne @relation(fields: [produitId], references: [id])
+  numeroCompte    String
+  solde           Decimal  @db.Decimal(14, 2) @default(0)
+  actif           Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  mouvements MouvementEpargne[]
+
+  @@unique([tenantId, numeroCompte])
+  @@index([tenantId])
+  @@index([membreId])
+}
+
+enum TypeMouvementEpargne {
+  DEPOT
+  RETRAIT
+  INTERET
+  FRAIS
+}
+
+model MouvementEpargne {
+  id            String   @id @default(cuid())
+  compteId      String
+  compte        CompteEpargne @relation(fields: [compteId], references: [id])
+  type          TypeMouvementEpargne
+  montant       Decimal  @db.Decimal(14, 2)
+  soldeApres    Decimal  @db.Decimal(14, 2)
+  reference     String?
+  createdAt     DateTime @default(now())
+
+  @@index([compteId])
+}
+
+// ---------------------------------------------------------
+// CRÉDIT
+// ---------------------------------------------------------
+
+model ProduitCredit {
+  id             String  @id @default(cuid())
+  tenantId       String
+  tenant         Tenant  @relation(fields: [tenantId], references: [id])
+  nom            String
+  tauxInteret    Decimal @db.Decimal(5, 2) // % (méthode définie au calcul échéancier)
+  dureeMinMois   Int
+  dureeMaxMois   Int
+  montantMin     Decimal @db.Decimal(14, 2)
+  montantMax     Decimal @db.Decimal(14, 2)
+  penaliteRetard Decimal @db.Decimal(5, 2) @default(0) // % par jour ou forfait
+  actif          Boolean @default(true)
+
+  credits Credit[]
+
+  @@index([tenantId])
+}
+
+enum StatutCredit {
+  EN_ATTENTE
+  APPROUVE
+  REJETE
+  DECAISSE
+  EN_COURS
+  SOLDE
+  EN_RETARD
+  CONTENTIEUX
+}
+
+model Credit {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  agenceId       String
+  agence         Agence   @relation(fields: [agenceId], references: [id])
+  membreId       String
+  membre         Membre   @relation(fields: [membreId], references: [id])
+  produitId      String
+  produit        ProduitCredit @relation(fields: [produitId], references: [id])
+  agentCreditId  String
+  agentCredit    User     @relation("AgentCredit", fields: [agentCreditId], references: [id])
+
+  numeroCredit   String   // ex: CR-2026-0001
+  montant        Decimal  @db.Decimal(14, 2)
+  tauxInteret    Decimal  @db.Decimal(5, 2)
+  dureeMois      Int
+  dateDecaissement DateTime?
+  statut         StatutCredit @default(EN_ATTENTE)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  echeancier    EcheanceCredit[]
+  remboursements Remboursement[]
+
+  @@unique([tenantId, numeroCredit])
+  @@index([tenantId])
+  @@index([membreId])
+  @@index([statut])
+}
+
+enum StatutEcheance {
+  A_VENIR
+  PAYEE
+  PARTIELLE
+  EN_RETARD
+}
+
+model EcheanceCredit {
+  id            String   @id @default(cuid())
+  creditId      String
+  credit        Credit   @relation(fields: [creditId], references: [id])
+  numeroEcheance Int
+  dateEcheance  DateTime
+  montantCapital Decimal @db.Decimal(14, 2)
+  montantInteret Decimal @db.Decimal(14, 2)
+  montantTotal  Decimal  @db.Decimal(14, 2)
+  montantPaye   Decimal  @db.Decimal(14, 2) @default(0)
+  statut        StatutEcheance @default(A_VENIR)
+
+  @@index([creditId])
+  @@index([dateEcheance])
+}
+
+model Remboursement {
+  id           String   @id @default(cuid())
+  creditId     String
+  credit       Credit   @relation(fields: [creditId], references: [id])
+  montant      Decimal  @db.Decimal(14, 2)
+  datePaiement DateTime @default(now())
+  modePaiement String?  // espèces, Lumicash, CashTel, etc.
+  reference    String?
+
+  @@index([creditId])
+}
+
+// ---------------------------------------------------------
+// CAISSE / BANQUE (logique VB6 habituelle : report + debit - credit)
+// ---------------------------------------------------------
+
+model CaisseMouvement {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  agenceId   String?
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  ordo       Int
+  libelle    String
+  debit      Decimal  @db.Decimal(14, 2) @default(0)
+  credit     Decimal  @db.Decimal(14, 2) @default(0)
+  solde      Decimal  @db.Decimal(14, 2)
+  dateOp     DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([ordo])
+}
+
+model BanqueMouvement {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  agenceId   String?
+  ordo       Int
+  libelle    String
+  debit      Decimal  @db.Decimal(14, 2) @default(0)
+  credit     Decimal  @db.Decimal(14, 2) @default(0)
+  solde      Decimal  @db.Decimal(14, 2)
+  dateOp     DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([ordo])
+}
+
+model DepenseTenant {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  libelle    String
+  montant    Decimal  @db.Decimal(14, 2)
+  categorie  String?
+  dateDepense DateTime @default(now())
+
+  @@index([tenantId])
+}
