@@ -7,7 +7,7 @@
 //   - Mensualité totale décroissante au fil du temps
 // ==========================================================
 
-import { PrismaClient, Decimal as PrismaDecimal } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 import Decimal from "decimal.js";
 
 export interface LigneEcheancier {
